@@ -3,15 +3,8 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <math.h>
+#include <time.h>
 
-/*
- * Apply an N x N filter to an M x M grayscale image.
- *
- * - Input and output pixels are unsigned 8-bit integers.
- * - Filter coefficients and accumulation use float.
- * - Out-of-bounds pixels are treated as zero.
- * - absolute_response is enabled for edge detection.
- */
 void convolve_cpu(
     const uint8_t *input,
     uint8_t *output,
@@ -33,15 +26,11 @@ void convolve_cpu(
 
                     if (iy >= 0 && iy < M &&
                         ix >= 0 && ix < M) {
-
-                        // Flip the filter for mathematical convolution.
                         int fy = N - 1 - ky;
                         int fx = N - 1 - kx;
 
-                        float pixel = input[iy * M + ix];
-                        float coeff = filter[fy * N + fx];
-
-                        sum += pixel * coeff;
+                        sum += input[iy * M + ix]
+                             * filter[fy * N + fx];
                     }
                 }
             }
@@ -50,8 +39,7 @@ void convolve_cpu(
                 sum = fabsf(sum);
             }
 
-            // Convert the result back to the valid pixel range.
-            if (sum < 0.0f)   sum = 0.0f;
+            if (sum < 0.0f) sum = 0.0f;
             if (sum > 255.0f) sum = 255.0f;
 
             output[y * M + x] = (uint8_t)(sum + 0.5f);
@@ -59,52 +47,79 @@ void convolve_cpu(
     }
 }
 
-int main(void) {
-    const int M = 64;
+int main(int argc, char **argv) {
+    int M = (argc > 1) ? atoi(argv[1]) : 256;
+    int N = (argc > 2) ? atoi(argv[2]) : 3;
 
-    uint8_t *input = calloc((size_t)M * M, sizeof(uint8_t));
-    uint8_t *output = calloc((size_t)M * M, sizeof(uint8_t));
-
-    if (input == NULL || output == NULL) {
-        fprintf(stderr, "Memory allocation failed\n");
-        free(input);
-        free(output);
+    if (M <= 0 || N <= 0 || N % 2 == 0 || N > M) {
+        fprintf(stderr,
+                "Usage: %s [image_size M] [odd_filter_size N]\n",
+                argv[0]);
         return 1;
     }
 
-    // Synthetic test image: a bright square on a dark background.
-    for (int y = 16; y < 48; y++) {
-        for (int x = 16; x < 48; x++) {
-            input[y * M + x] = 255;
-        }
+    size_t pixels = (size_t)M * M;
+    size_t filter_elements = (size_t)N * N;
+
+    uint8_t *input = malloc(pixels);
+    uint8_t *output = malloc(pixels);
+    float *filter = calloc(filter_elements, sizeof(float));
+
+    if (!input || !output || !filter) {
+        fprintf(stderr, "Memory allocation failed\n");
+        free(input);
+        free(output);
+        free(filter);
+        return 1;
     }
 
-    const float edge_filter[9] = {
-         0, -1,  0,
-        -1,  4, -1,
-         0, -1,  0
-    };
+    // Deterministic synthetic grayscale image.
+    srand(0);
+    for (size_t i = 0; i < pixels; i++) {
+        input[i] = (uint8_t)(rand() % 256);
+    }
 
-    convolve_cpu(input, output, M, edge_filter, 3, 1);
+    // Generalized Laplacian edge filter:
+    // center = 4, immediate neighbors = -1.
+    // Other entries remain zero.
+    int center = N / 2;
+    filter[center * N + center] = 4.0f;
 
-    // Write the output as a binary grayscale PGM image.
+    if (center > 0) {
+        filter[(center - 1) * N + center] = -1.0f;
+        filter[(center + 1) * N + center] = -1.0f;
+        filter[center * N + center - 1] = -1.0f;
+        filter[center * N + center + 1] = -1.0f;
+    }
+
+    clock_t start = clock();
+
+    convolve_cpu(input, output, M, filter, N, 1);
+
+    clock_t end = clock();
+    double elapsed_ms =
+        1000.0 * (double)(end - start) / CLOCKS_PER_SEC;
+
+    printf("CPU convolution: image=%dx%d filter=%dx%d time=%.3f ms\n",
+           M, M, N, N, elapsed_ms);
+
     FILE *file = fopen("edge_output.pgm", "wb");
-
-    if (file == NULL) {
+    if (!file) {
         perror("Could not create output image");
         free(input);
         free(output);
+        free(filter);
         return 1;
     }
 
     fprintf(file, "P5\n%d %d\n255\n", M, M);
-    fwrite(output, sizeof(uint8_t), (size_t)M * M, file);
+    fwrite(output, sizeof(uint8_t), pixels, file);
     fclose(file);
 
-    printf("CPU convolution completed: %d x %d image, 3 x 3 filter\n", M, M);
     printf("Output saved to edge_output.pgm\n");
 
     free(input);
     free(output);
+    free(filter);
     return 0;
 }
